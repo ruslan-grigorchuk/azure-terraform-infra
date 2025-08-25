@@ -6,7 +6,7 @@ A comprehensive, enterprise-grade Terraform project for provisioning Azure infra
 [![Azure](https://img.shields.io/badge/Azure-Cloud-0078D4?logo=microsoftazure)](https://azure.microsoft.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 This infrastructure project provisions a complete Azure environment suitable for modern web applications:
 
@@ -41,7 +41,7 @@ This infrastructure project provisions a complete Azure environment suitable for
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 🚀 Features
+## Features
 
 ### Infrastructure Components
 - **Azure App Service**: Scalable web application hosting with custom domain support
@@ -67,7 +67,7 @@ This infrastructure project provisions a complete Azure environment suitable for
 - **Documentation**: Comprehensive documentation and examples
 - **Security Scanning**: Built-in security validation and checks
 
-## 📋 Prerequisites
+## Prerequisites
 
 ### Required Tools
 - [Terraform](https://www.terraform.io/downloads.html) >= 1.5.0
