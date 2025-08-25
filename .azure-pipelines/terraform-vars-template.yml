@@ -1,0 +1,51 @@
+# Template for Terraform variable groups and pipeline parameters
+# This file documents the required variables for Azure DevOps Variable Groups
+
+parameters:
+  - name: environment
+    displayName: 'Environment'
+    type: string
+    values:
+      - dev
+      - staging
+      - prod
+
+  - name: subscriptionId
+    displayName: 'Azure Subscription ID'
+    type: string
+
+  - name: resourceGroup
+    displayName: 'Resource Group Name'
+    type: string
+    default: 'terraform-state-rg'
+
+variables:
+  # Variable Group: terraform-secrets
+  # Contains sensitive values that should be configured in Azure DevOps
+  # - serviceConnection: Azure Resource Manager service connection name
+  # - tfStateStorageAccount: Storage account name for Terraform state
+  # - tfStateContainer: Container name for Terraform state (default: tfstate)
+  # - tfStateResourceGroup: Resource group containing state storage account
+  
+  # Pipeline variables
+  - name: terraformVersion
+    value: '1.5.0'
+  - name: environment
+    value: ${{ parameters.environment }}
+  - name: subscriptionId
+    value: ${{ parameters.subscriptionId }}
+  - name: resourceGroup
+    value: ${{ parameters.resourceGroup }}
+
+# Required Variable Group Configuration:
+# 1. Create variable group named 'terraform-secrets' with these variables:
+#    - serviceConnection: 'azure-service-connection'
+#    - tfStateStorageAccount: 'your-tf-state-storage-account'
+#    - tfStateContainer: 'tfstate'
+#    - tfStateResourceGroup: 'terraform-state-rg'
+#
+# 2. Link this variable group to your pipeline
+#
+# 3. Ensure the service connection has appropriate permissions:
+#    - Contributor role on target subscription
+#    - Storage Blob Data Contributor on state storage account

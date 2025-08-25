@@ -1,0 +1,352 @@
+# Azure DevOps Pipeline for Terraform Infrastructure
+# Enterprise-grade pipeline with multi-environment deployment and security scanning
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    exclude:
+      - README.md
+      - docs/**
+      - .gitignore
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - docs/**
+
+variables:
+  - group: terraform-secrets
+  - name: terraformVersion
+    value: '1.5.0'
+
+stages:
+  # Validation Stage
+  - stage: Validate
+    displayName: 'Validate and Security Scan'
+    jobs:
+      - job: ValidationJob
+        displayName: 'Terraform Validation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            clean: 'true'
+            
+          - task: Bash@3
+            displayName: 'Install Terraform'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Install Terraform
+                wget https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                unzip terraform_$(terraformVersion)_linux_amd64.zip
+                sudo mv terraform /usr/local/bin/
+                terraform version
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Format Check'
+            inputs:
+              azureSubscription: '$(serviceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Checking Terraform format..."
+                terraform fmt -check -recursive .
+                if [ $? -ne 0 ]; then
+                  echo "##vso[task.logissue type=error]Terraform files are not properly formatted"
+                  exit 1
+                fi
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Validate'
+            inputs:
+              azureSubscription: '$(serviceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Initializing Terraform..."
+                terraform init -backend=false
+                
+                echo "Validating Terraform configuration..."
+                terraform validate
+
+          - task: Bash@3
+            displayName: 'Run Custom Validation Script'
+            inputs:
+              targetType: 'inline'
+              script: |
+                chmod +x scripts/validate.sh
+                ./scripts/validate.sh
+
+          - task: Bash@3
+            displayName: 'Security Scanning with TFSec'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Installing TFSec..."
+                curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+                
+                echo "Running TFSec security scan..."
+                tfsec . --format junit --out tfsec-report.xml --soft-fail
+            continueOnError: true
+
+          - task: PublishTestResults@2
+            displayName: 'Publish TFSec Results'
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'tfsec-report.xml'
+              testRunTitle: 'TFSec Security Scan'
+            condition: always()
+
+  # Development Environment
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: Validate
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
+    variables:
+      - name: environment
+        value: 'dev'
+    jobs:
+      - deployment: DeployDevJob
+        displayName: 'Deploy Dev Environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'development'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: 'true'
+
+                - task: Bash@3
+                  displayName: 'Install Terraform'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      wget https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                      unzip terraform_$(terraformVersion)_linux_amd64.zip
+                      sudo mv terraform /usr/local/bin/
+                      terraform version
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Plan'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Initializing Terraform for $(environment) environment..."
+                      terraform init \
+                        -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                        -backend-config="container_name=$(tfStateContainer)" \
+                        -backend-config="key=$(environment).terraform.tfstate" \
+                        -backend-config="resource_group_name=$(tfStateResourceGroup)"
+                      
+                      echo "Creating Terraform plan..."
+                      terraform plan \
+                        -var-file="environments/$(environment)/terraform.tfvars" \
+                        -out="$(environment).tfplan" \
+                        -detailed-exitcode
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Applying Terraform plan for $(environment) environment..."
+                      terraform apply -auto-approve "$(environment).tfplan"
+
+                - task: AzureCLI@2
+                  displayName: 'Output Infrastructure Details'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Infrastructure outputs:"
+                      terraform output -json > terraform-outputs.json
+                      cat terraform-outputs.json
+
+                - task: PublishBuildArtifacts@1
+                  displayName: 'Publish Terraform Outputs'
+                  inputs:
+                    PathtoPublish: 'terraform-outputs.json'
+                    ArtifactName: 'terraform-outputs-$(environment)'
+
+  # Staging Environment
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      - name: environment
+        value: 'staging'
+    jobs:
+      - deployment: DeployStagingJob
+        displayName: 'Deploy Staging Environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: 'true'
+
+                - task: Bash@3
+                  displayName: 'Install Terraform'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      wget https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                      unzip terraform_$(terraformVersion)_linux_amd64.zip
+                      sudo mv terraform /usr/local/bin/
+                      terraform version
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Plan and Apply'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      terraform init \
+                        -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                        -backend-config="container_name=$(tfStateContainer)" \
+                        -backend-config="key=$(environment).terraform.tfstate" \
+                        -backend-config="resource_group_name=$(tfStateResourceGroup)"
+                      
+                      terraform plan \
+                        -var-file="environments/$(environment)/terraform.tfvars" \
+                        -out="$(environment).tfplan"
+                      
+                      terraform apply -auto-approve "$(environment).tfplan"
+
+                - task: Bash@3
+                  displayName: 'Post-Deployment Testing'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Running post-deployment tests..."
+                      terraform output -json > staging-outputs.json
+
+  # Production Environment
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployStaging
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      - name: environment
+        value: 'prod'
+    jobs:
+      - deployment: DeployProdJob
+        displayName: 'Deploy Production Environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: 'true'
+
+                - task: Bash@3
+                  displayName: 'Install Terraform'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      wget https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+                      unzip terraform_$(terraformVersion)_linux_amd64.zip
+                      sudo mv terraform /usr/local/bin/
+                      terraform version
+
+                - task: AzureCLI@2
+                  displayName: 'Enhanced Security Check'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Running enhanced security validation for production..."
+                      ./scripts/validate.sh
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Plan'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      terraform init \
+                        -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                        -backend-config="container_name=$(tfStateContainer)" \
+                        -backend-config="key=$(environment).terraform.tfstate" \
+                        -backend-config="resource_group_name=$(tfStateResourceGroup)"
+                      
+                      echo "Creating detailed production plan..."
+                      terraform plan \
+                        -var-file="environments/$(environment)/terraform.tfvars" \
+                        -out="$(environment).tfplan" \
+                        -detailed-exitcode
+                      
+                      terraform show -no-color "$(environment).tfplan" > terraform-plan-output.txt
+
+                - task: PublishBuildArtifacts@1
+                  displayName: 'Publish Production Plan'
+                  inputs:
+                    PathtoPublish: 'terraform-plan-output.txt'
+                    ArtifactName: 'terraform-plan-production'
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Apply Production'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Deploying to production environment..."
+                      terraform apply -auto-approve "$(environment).tfplan"
+
+                - task: AzureCLI@2
+                  displayName: 'Post-Production Health Check'
+                  inputs:
+                    azureSubscription: '$(serviceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Running production health checks..."
+                      terraform output -json > prod-outputs.json
+                      
+                      # Test application endpoints
+                      APP_URL=$(terraform output -raw app_service_url)
+                      echo "Testing application at: $APP_URL"
+                      
+                      for i in {1..5}; do
+                        if curl -f -s "$APP_URL" > /dev/null; then
+                          echo "Health check passed"
+                          break
+                        else
+                          echo "Health check attempt $i failed, retrying..."
+                          sleep 30
+                        fi
+                      done
+
+                - task: PublishBuildArtifacts@1
+                  displayName: 'Publish Production Outputs'
+                  inputs:
+                    PathtoPublish: 'prod-outputs.json'
+                    ArtifactName: 'terraform-outputs-production'

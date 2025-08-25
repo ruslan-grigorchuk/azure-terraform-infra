@@ -1,0 +1,50 @@
+# GitLab CI/CD Variables Configuration
+# This file documents the required CI/CD variables for GitLab
+
+# Required GitLab CI/CD Variables (Settings -> CI/CD -> Variables):
+
+# Azure Authentication Variables (Protected + Masked)
+# AZURE_CLIENT_ID: Azure service principal client ID
+# AZURE_CLIENT_SECRET: Azure service principal client secret
+# AZURE_SUBSCRIPTION_ID: Azure subscription ID
+# AZURE_TENANT_ID: Azure AD tenant ID
+
+# Terraform State Backend Variables (Protected)
+# TF_STATE_STORAGE_ACCOUNT: Storage account name for Terraform state
+# TF_STATE_CONTAINER: Container name for Terraform state (default: gitlab-tfstate)
+# TF_STATE_RESOURCE_GROUP: Resource group containing state storage account
+
+# Application URLs for Environment Deployment (Optional)
+# APP_SERVICE_URL_DEV: Development environment application URL
+# APP_SERVICE_URL_STAGING: Staging environment application URL
+# APP_SERVICE_URL_PROD: Production environment application URL
+
+# GitLab Environment Protection Rules:
+# 1. staging environment: Require manual approval
+# 2. production environment: Require manual approval + deployment branch restrictions
+
+variables:
+  # Global pipeline variables
+  TF_VERSION: "1.5.0"
+  TF_ROOT: ${CI_PROJECT_DIR}
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  
+  # Terraform state configuration
+  TF_STATE_NAME: ${CI_ENVIRONMENT_NAME}
+  
+  # Default environment URLs (override in CI/CD variables if needed)
+  APP_SERVICE_URL_DEV: "https://dev-app-url-placeholder.azurewebsites.net"
+  APP_SERVICE_URL_STAGING: "https://staging-app-url-placeholder.azurewebsites.net" 
+  APP_SERVICE_URL_PROD: "https://prod-app-url-placeholder.azurewebsites.net"
+
+# Security Configuration:
+# 1. All Azure credentials should be marked as "Protected" and "Masked"
+# 2. Set up deployment approval rules for staging and production environments
+# 3. Configure branch protection rules to restrict production deployments to main branch
+# 4. Enable security scanning in pipeline and review results before deployment
+
+# Service Principal Permissions Required:
+# - Contributor role on target Azure subscription
+# - Storage Blob Data Contributor on Terraform state storage account
+# - User Access Administrator (if deploying RBAC configurations)

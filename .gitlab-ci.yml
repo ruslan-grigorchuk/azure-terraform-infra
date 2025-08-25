@@ -1,0 +1,425 @@
+# GitLab CI/CD Pipeline for Terraform Infrastructure
+# Enterprise-grade pipeline with security scanning, multi-environment deployment, and approval workflows
+
+stages:
+  - validate
+  - security
+  - plan-dev
+  - deploy-dev
+  - plan-staging
+  - deploy-staging
+  - plan-prod
+  - deploy-prod
+
+variables:
+  TF_VERSION: "1.5.0"
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_STATE_NAME: ${CI_ENVIRONMENT_NAME}
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+
+# Global before_script for all jobs
+before_script:
+  - echo "Setting up Terraform environment..."
+  - apk add --no-cache curl jq
+  - wget https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+  - unzip terraform_${TF_VERSION}_linux_amd64.zip
+  - mv terraform /usr/local/bin/
+  - terraform version
+
+# Cache Terraform plugins
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - ${TF_ROOT}/.terraform
+    - ${TF_ROOT}/.terraform.lock.hcl
+
+# Validation Stage
+terraform:validate:
+  stage: validate
+  image: hashicorp/terraform:$TF_VERSION
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\/.*/
+  script:
+    - cd $TF_ROOT
+    - echo "Checking Terraform format..."
+    - terraform fmt -check -recursive .
+    - echo "Initializing Terraform..."
+    - terraform init -backend=false
+    - echo "Validating Terraform configuration..."
+    - terraform validate
+  artifacts:
+    reports:
+      junit: terraform-validate-report.xml
+    paths:
+      - terraform-validate-report.xml
+    expire_in: 1 week
+
+# Custom validation script
+custom:validate:
+  stage: validate
+  image: alpine:latest
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+  before_script:
+    - apk add --no-cache bash curl
+  script:
+    - cd $TF_ROOT
+    - chmod +x scripts/validate.sh
+    - ./scripts/validate.sh
+  artifacts:
+    reports:
+      junit: validation-report.xml
+    expire_in: 1 week
+  allow_failure: false
+
+# Security Scanning Stage
+security:tfsec:
+  stage: security
+  image: alpine:latest
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+  script:
+    - cd $TF_ROOT
+    - echo "Running TFSec security scan..."
+    - tfsec . --format junit --out tfsec-report.xml --soft-fail
+    - tfsec . --format json --out tfsec-results.json
+  artifacts:
+    reports:
+      junit: tfsec-report.xml
+    paths:
+      - tfsec-results.json
+    expire_in: 1 week
+  allow_failure: true
+
+security:checkov:
+  stage: security
+  image: bridgecrew/checkov:latest
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+  script:
+    - cd $TF_ROOT
+    - echo "Running Checkov security scan..."
+    - checkov -d . --framework terraform --output junitxml --output-file checkov-report.xml --soft-fail
+    - checkov -d . --framework terraform --output json --output-file checkov-results.json
+  artifacts:
+    reports:
+      junit: checkov-report.xml
+    paths:
+      - checkov-results.json
+    expire_in: 1 week
+  allow_failure: true
+
+# Development Environment Planning
+plan:dev:
+  stage: plan-dev
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: development
+    action: prepare
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH == "main"
+  variables:
+    TF_VAR_environment: "dev"
+  before_script:
+    - cd $TF_ROOT
+    - echo "Authenticating with Azure..."
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Planning development environment..."
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=dev.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform plan \
+        -var-file="environments/dev/terraform.tfvars" \
+        -out="dev.tfplan" \
+        -detailed-exitcode
+    - terraform show -json dev.tfplan > dev-plan.json
+  artifacts:
+    paths:
+      - dev.tfplan
+      - dev-plan.json
+    expire_in: 1 week
+    reports:
+      terraform: dev-plan.json
+
+# Development Environment Deployment
+deploy:dev:
+  stage: deploy-dev
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: development
+    url: $APP_SERVICE_URL_DEV
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH == "main"
+  dependencies:
+    - plan:dev
+  variables:
+    TF_VAR_environment: "dev"
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Deploying to development environment..."
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=dev.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform apply -auto-approve dev.tfplan
+    - echo "Getting infrastructure outputs..."
+    - terraform output -json > dev-outputs.json
+    - echo "Development deployment completed successfully"
+  artifacts:
+    paths:
+      - dev-outputs.json
+    expire_in: 1 week
+  after_script:
+    - echo "Running post-deployment health checks..."
+    - |
+      if [ -f dev-outputs.json ]; then
+        APP_URL=$(cat dev-outputs.json | jq -r '.app_service_url.value')
+        echo "Testing application at: $APP_URL"
+        curl -f -s $APP_URL > /dev/null && echo "Health check passed" || echo "Health check failed"
+      fi
+
+# Staging Environment Planning
+plan:staging:
+  stage: plan-staging
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: staging
+    action: prepare
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  dependencies:
+    - deploy:dev
+  variables:
+    TF_VAR_environment: "staging"
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Planning staging environment..."
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=staging.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform plan \
+        -var-file="environments/staging/terraform.tfvars" \
+        -out="staging.tfplan" \
+        -detailed-exitcode
+    - terraform show -json staging.tfplan > staging-plan.json
+  artifacts:
+    paths:
+      - staging.tfplan
+      - staging-plan.json
+    expire_in: 1 week
+    reports:
+      terraform: staging-plan.json
+
+# Staging Environment Deployment (Manual Approval Required)
+deploy:staging:
+  stage: deploy-staging
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: staging
+    url: $APP_SERVICE_URL_STAGING
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  dependencies:
+    - plan:staging
+  variables:
+    TF_VAR_environment: "staging"
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Deploying to staging environment..."
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=staging.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform apply -auto-approve staging.tfplan
+    - terraform output -json > staging-outputs.json
+    - echo "Staging deployment completed successfully"
+  artifacts:
+    paths:
+      - staging-outputs.json
+    expire_in: 1 week
+
+# Production Environment Planning
+plan:prod:
+  stage: plan-prod
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: production
+    action: prepare
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  dependencies:
+    - deploy:staging
+  variables:
+    TF_VAR_environment: "prod"
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Planning production environment..."
+    - echo "Running enhanced security validation..."
+    - ./scripts/validate.sh
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=prod.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform plan \
+        -var-file="environments/prod/terraform.tfvars" \
+        -out="prod.tfplan" \
+        -detailed-exitcode
+    - terraform show -json prod.tfplan > prod-plan.json
+    - echo "Production plan created and ready for review"
+  artifacts:
+    paths:
+      - prod.tfplan
+      - prod-plan.json
+    expire_in: 2 weeks
+    reports:
+      terraform: prod-plan.json
+
+# Production Environment Deployment (Manual Approval + Enhanced Security)
+deploy:prod:
+  stage: deploy-prod
+  image: hashicorp/terraform:$TF_VERSION
+  environment:
+    name: production
+    url: $APP_SERVICE_URL_PROD
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  dependencies:
+    - plan:prod
+  variables:
+    TF_VAR_environment: "prod"
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Starting production deployment..."
+    - echo "Running final security validation..."
+    - ./scripts/validate.sh
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=prod.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - echo "Applying production changes..."
+    - terraform apply -auto-approve prod.tfplan
+    - terraform output -json > prod-outputs.json
+    - echo "Production deployment completed successfully"
+  artifacts:
+    paths:
+      - prod-outputs.json
+    expire_in: 4 weeks
+  after_script:
+    - echo "Running comprehensive production health checks..."
+    - |
+      if [ -f prod-outputs.json ]; then
+        APP_URL=$(cat prod-outputs.json | jq -r '.app_service_url.value')
+        echo "Testing production application at: $APP_URL"
+        
+        # Enhanced health checks for production
+        for i in {1..5}; do
+          if curl -f -s -o /dev/null -w "%{http_code}" $APP_URL | grep -q "200"; then
+            echo "Production health check passed (attempt $i)"
+            break
+          else
+            echo "Production health check failed (attempt $i), retrying..."
+            sleep 30
+          fi
+        done
+      fi
+
+# Infrastructure Drift Detection (Scheduled)
+drift:detection:
+  stage: validate
+  image: hashicorp/terraform:$TF_VERSION
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  parallel:
+    matrix:
+      - ENVIRONMENT: dev
+      - ENVIRONMENT: staging
+      - ENVIRONMENT: prod
+  before_script:
+    - cd $TF_ROOT
+    - export ARM_CLIENT_ID=$AZURE_CLIENT_ID
+    - export ARM_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+    - export ARM_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID
+    - export ARM_TENANT_ID=$AZURE_TENANT_ID
+  script:
+    - echo "Checking for infrastructure drift in $ENVIRONMENT environment..."
+    - terraform init \
+        -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+        -backend-config="container_name=$TF_STATE_CONTAINER" \
+        -backend-config="key=$ENVIRONMENT.terraform.tfstate" \
+        -backend-config="resource_group_name=$TF_STATE_RESOURCE_GROUP"
+    - terraform plan \
+        -var-file="environments/$ENVIRONMENT/terraform.tfvars" \
+        -detailed-exitcode \
+        -out="$ENVIRONMENT-drift.tfplan" || DRIFT_EXIT_CODE=$?
+    - |
+      if [ "$DRIFT_EXIT_CODE" = "2" ]; then
+        echo "Infrastructure drift detected in $ENVIRONMENT!"
+        terraform show -no-color "$ENVIRONMENT-drift.tfplan" > "$ENVIRONMENT-drift-report.txt"
+        exit 1
+      elif [ "$DRIFT_EXIT_CODE" = "1" ]; then
+        echo "Error occurred during drift detection in $ENVIRONMENT"
+        exit 1
+      else
+        echo "No infrastructure drift detected in $ENVIRONMENT"
+      fi
+  artifacts:
+    paths:
+      - "*-drift-report.txt"
+      - "*-drift.tfplan"
+    expire_in: 1 week
+    when: on_failure
+  allow_failure: true
