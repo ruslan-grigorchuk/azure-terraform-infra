@@ -1,0 +1,40 @@
+# Example Local Configuration File
+# Copy this file to 'local.tfvars' and customize values for your local development
+
+# Basic Configuration
+environment  = "dev"
+location     = "East US"
+project_name = "myapp"
+owner        = "Your Name"
+cost_center  = "DEV-001"
+
+# App Service Configuration
+app_service_sku = "B1"
+custom_domain   = ""  # Leave empty for local development
+
+# SQL Database Configuration  
+sql_admin_username = "devadmin"
+sql_sku_name      = "S0"
+sql_max_size_gb   = 5
+
+# Storage Account Configuration
+storage_account_tier     = "Standard"
+storage_replication_type = "LRS"
+
+# Service Bus Configuration
+enable_service_bus = false  # Set to true if you need Service Bus
+service_bus_sku    = "Basic"
+
+# Network Configuration - Add your IP address for access
+allowed_ip_ranges = [
+  "0.0.0.0/0"  # WARNING: This allows access from anywhere. Restrict in production!
+  # "YOUR.PUBLIC.IP.ADDRESS/32"  # Replace with your actual IP
+]
+
+# Additional Tags
+additional_tags = {
+  Developer     = "Your Name"
+  Purpose       = "Local Development"
+  CreatedBy     = "Terraform"
+  DeleteAfter   = "2024-12-31"  # Add cleanup date for dev resources
+}
